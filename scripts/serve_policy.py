@@ -66,12 +66,12 @@ DEFAULT_CHECKPOINT: dict[EnvMode, Checkpoint] = {
         dir="s3://openpi-assets/checkpoints/pi0_aloha_sim",
     ),
     EnvMode.DROID: Checkpoint(
-        config="pi0_fast_droid",
-        dir="s3://openpi-assets/checkpoints/pi0_fast_droid",
+        config="pi0_droid",
+        dir="s3://openpi-assets/checkpoints/pi0_droid",
     ),
     EnvMode.LIBERO: Checkpoint(
-        config="pi0_fast_libero",
-        dir="s3://openpi-assets/checkpoints/pi0_fast_libero",
+        config="pi0_libero",
+        dir="s3://openpi-assets/checkpoints/pi0_libero",
     ),
 }
 

@@ -11,6 +11,7 @@ from openpi_client import image_tools
 from openpi.models import tokenizer as _tokenizer
 from openpi.shared import array_typing as at
 from openpi.shared import normalize as _normalize
+import jax.numpy as jnp
 
 DataDict: TypeAlias = at.PyTree
 NormStats: TypeAlias = _normalize.NormStats
@@ -215,27 +216,31 @@ class DeltaActions(DataTransformFn):
         return data
 
 
+
 @dataclasses.dataclass(frozen=True)
 class AbsoluteActions(DataTransformFn):
-    """Repacks delta actions into absolute action space."""
-
-    # Boolean mask for the action dimensions to be repacked into absolute action space. Length
-    # can be smaller than the actual number of dimensions. If None, this transform is a no-op.
-    # See `make_bool_mask` for more details.
+    """Repack delta actions into absolute action space."""
     mask: Sequence[bool] | None
 
     def __call__(self, data: DataDict) -> DataDict:
         if "actions" not in data or self.mask is None:
             return data
 
-        state, actions = data["state"], data["actions"]
-        mask = np.asarray(self.mask)
+        state = jnp.asarray(data["state"])    # assumed to be a JAX array
+        actions = jnp.asarray(data["actions"])  # assumed to be a JAX array
+        mask = jnp.asarray(self.mask)  # boolean array of shape (dims,)
         dims = mask.shape[-1]
-        actions[..., :dims] += np.expand_dims(np.where(mask, state[..., :dims], 0), axis=-2)
+
+        # compute the absolute offsets: shape (..., dims)
+        abs_offset = jnp.where(mask, state[..., :dims], 0)
+        # insert a length-1 chunk axis so we can broadcast over the chunk dimension
+        abs_offset = abs_offset[..., None, :]  # equivalent to expand_dims(axis=-2)
+
+        # use `.at` to add to the first `dims` of the last axis
+        actions = actions.at[..., :dims].add(abs_offset)
+
         data["actions"] = actions
-
         return data
-
 
 @dataclasses.dataclass(frozen=True)
 class TokenizePrompt(DataTransformFn):

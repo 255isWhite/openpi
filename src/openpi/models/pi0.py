@@ -268,9 +268,9 @@ class Pi0(_model.BaseModel):
     @override
     def sample_actions(
         self,
-        rng: at.KeyArrayLike,
         observation: _model.Observation,
         *,
+        noise: jnp.ndarray,
         num_steps: int | at.Int[at.Array, ""] = 10,
     ) -> _model.Actions:
         observation = _model.preprocess_observation(None, observation, train=False)
@@ -278,14 +278,11 @@ class Pi0(_model.BaseModel):
         # distribution. yes, this is the opposite of the pi0 paper, and I'm sorry.
         dt = -1.0 / num_steps
         batch_size = observation.state.shape[0]
-        noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
-
         # first fill KV cache with a forward pass of the prefix
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
         _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
-
         def step(carry):
             x_t, time = carry
             suffix_tokens, suffix_mask, suffix_ar_mask = self.embed_suffix(
@@ -320,6 +317,21 @@ class Pi0(_model.BaseModel):
             x_t, time = carry
             # robust to floating-point error
             return time >= -dt / 2
-
         x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
         return x_0
+    
+    # get the prfix representation
+    def get_prefix_rep(self, observation: _model.Observation):
+        """
+        Returns the Gemma (VLM) hidden‐state representations for images + language.
+        Output shape is [B, S_prefix, W], where:
+          B = batch size,
+          S_prefix = total # of image tokens + text tokens,
+          W = Gemma hidden‑width.
+        """
+        observation = _model.preprocess_observation(None, observation, train=False)
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+        positions = jnp.cumsum(prefix_mask, axis=1) - 1
+        (hidden_state, _), kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+        return hidden_state, kv_cache

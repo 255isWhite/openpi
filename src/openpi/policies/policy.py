@@ -36,24 +36,65 @@ class Policy(BasePolicy):
         self._rng = rng or jax.random.key(0)
         self._sample_kwargs = sample_kwargs or {}
         self._metadata = metadata or {}
+        self.action_dim = model.action_dim
+        self.action_horizon = model.action_horizon
+        self._get_prefix_rep = nnx_utils.module_jit(model.get_prefix_rep)
 
     @override
-    def infer(self, obs: dict) -> dict:  # type: ignore[misc]
+    def infer(self, obs: dict, noise: jnp.ndarray | None = None) -> dict:  # type: ignore[misc]
         # Make a copy since transformations may modify the inputs in place.
         inputs = jax.tree.map(lambda x: x, obs)
         inputs = self._input_transform(inputs)
         # Make a batch and convert to jax.Array.
-        inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
-
-        self._rng, sample_rng = jax.random.split(self._rng)
+        if inputs["state"].ndim > 1:
+            batch_size = inputs["state"].shape[0]
+            def _add_batch_dim(x):
+                return jnp.broadcast_to(
+                    x[jnp.newaxis, ...],
+                    (batch_size,) + x.shape
+                )
+                
+            inputs = jax.tree.map(lambda x: jnp.asarray(x), inputs)
+            for key in inputs:
+                if key not in ["image", "state"]:
+                    inputs[key] = jax.tree.map(lambda x: _add_batch_dim(x), inputs[key])
+        else:
+            batch_size = 1
+            inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
+        # self._rng, sample_rng = jax.random.split(self._rng)
+        if noise is None:
+            self._rng, sample_rng = jax.random.split(self._rng)
+            noise = jax.random.normal(sample_rng, (batch_size, self.action_horizon, self.action_dim))
         outputs = {
             "state": inputs["state"],
-            "actions": self._sample_actions(sample_rng, _model.Observation.from_dict(inputs), **self._sample_kwargs),
+            "actions": self._sample_actions(_model.Observation.from_dict(inputs), noise=noise, **self._sample_kwargs),
         }
 
         # Unbatch and convert to np.ndarray.
-        outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
+        if batch_size == 1:
+            outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
+    
         return self._output_transform(outputs)
+    
+    @override
+    def get_prefix_rep(self, obs: dict):
+        inputs = jax.tree.map(lambda x: x, obs)
+        inputs = self._input_transform(inputs)
+        inputs = jax.tree.map(lambda x: jnp.asarray(x), inputs)
+        # add batch dim and broadcast for keys that are not "images" and "state"
+        if inputs["state"].ndim > 1:
+            batch_size = inputs["state"].shape[0]
+            def _add_batch_dim(x):
+                return jnp.broadcast_to(
+                    x[jnp.newaxis, ...],
+                    (batch_size,) + x.shape
+                )
+            for key in inputs:
+                if key not in ["image", "state"]:
+                    inputs[key] = jax.tree.map(lambda x: _add_batch_dim(x), inputs[key])
+        else:
+            inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
+        return self._get_prefix_rep(_model.Observation.from_dict(inputs))
 
     @property
     def metadata(self) -> dict[str, Any]:
