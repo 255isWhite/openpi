@@ -31,15 +31,25 @@ class Policy(BasePolicy):
         metadata: dict[str, Any] | None = None,
     ):
         self._sample_actions = nnx_utils.module_jit(model.sample_actions)
+        self._sample_noise = nnx_utils.module_jit(model.sample_noise)
         self._input_transform = _transforms.compose(transforms)
-        self._output_transform = _transforms.compose(output_transforms)
         self._rng = rng or jax.random.key(0)
         self._sample_kwargs = sample_kwargs or {}
         self._metadata = metadata or {}
         self.action_dim = model.action_dim
         self.action_horizon = model.action_horizon
         self._get_prefix_rep = nnx_utils.module_jit(model.get_prefix_rep)
-
+        
+        # we make output transforms optional for unnormalized actions
+        actions_transform = _transforms.compose(output_transforms)
+        raw_actions_transform = _transforms.compose(
+            remove_transform_of_type(output_transforms, _transforms.Unnormalize)
+        )
+        self._output_transform = ActionTransformWrapper(
+            actions_transform,
+            raw_actions_transform
+        )
+        
     @override
     def infer(self, obs: dict, noise: jnp.ndarray | None = None) -> dict:  # type: ignore[misc]
         # Make a copy since transformations may modify the inputs in place.
@@ -69,12 +79,46 @@ class Policy(BasePolicy):
             "state": inputs["state"],
             "actions": self._sample_actions(_model.Observation.from_dict(inputs), noise=noise, **self._sample_kwargs),
         }
-
+        
         # Unbatch and convert to np.ndarray.
         if batch_size == 1:
             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
     
         return self._output_transform(outputs)
+    
+    def reverse_infer(self, obs: dict, action: jnp.ndarray | None = None) -> dict:  # type: ignore[misc]
+        # Make a copy since transformations may modify the inputs in place.
+        inputs = jax.tree.map(lambda x: x, obs)
+        inputs = self._input_transform(inputs)
+        # Make a batch and convert to jax.Array.
+        if inputs["state"].ndim > 1:
+            batch_size = inputs["state"].shape[0]
+            def _add_batch_dim(x):
+                return jnp.broadcast_to(
+                    x[jnp.newaxis, ...],
+                    (batch_size,) + x.shape
+                )
+                
+            inputs = jax.tree.map(lambda x: jnp.asarray(x), inputs)
+            for key in inputs:
+                if key not in ["image", "state"]:
+                    inputs[key] = jax.tree.map(lambda x: _add_batch_dim(x), inputs[key])
+        else:
+            batch_size = 1
+            inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
+        # self._rng, sample_rng = jax.random.split(self._rng)
+        if action is None:
+            print("action is None, this is not expected, please check your code")
+        outputs = {
+            "state": inputs["state"],
+            "noise": self._sample_noise(_model.Observation.from_dict(inputs), action=action, **self._sample_kwargs),
+        }
+
+        # Unbatch and convert to np.ndarray.
+        if batch_size == 1:
+            outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
+    
+        return outputs
     
     @override
     def get_prefix_rep(self, obs: dict):
@@ -124,3 +168,23 @@ class PolicyRecorder(_base_policy.BasePolicy):
 
         np.save(output_path, np.asarray(data))
         return results
+    
+    
+class ActionTransformWrapper:
+    def __init__(self, actions_tf, raw_actions_tf):
+        self.actions_tf = actions_tf
+        self.raw_actions_tf = raw_actions_tf
+
+    def __call__(self, doc):
+        return_dict = {}
+
+        unnorm_dict = doc.copy()
+        trans_unnorm_dict = self.actions_tf(unnorm_dict)
+        return_dict["actions"] = trans_unnorm_dict["actions"][..., :7]  # only keep the first 7 actions
+            
+        norm_dict = doc.copy()
+        return_dict["norm_actions"] = self.raw_actions_tf(norm_dict)["actions"]
+        return return_dict
+    
+def remove_transform_of_type(transforms_list, target_cls):
+    return [t for t in transforms_list if not isinstance(t, target_cls)]

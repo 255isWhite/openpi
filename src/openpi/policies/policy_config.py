@@ -3,9 +3,9 @@ import dataclasses
 import logging
 import pathlib
 from typing import Any
-
+import flax.nnx as nnx
 import jax.numpy as jnp
-
+import openpi.shared.nnx_utils as nnx_utils
 import openpi.models.model as _model
 import openpi.policies.policy as _policy
 import openpi.shared.download as download
@@ -55,6 +55,10 @@ def create_trained_policy(
     logging.info("Loading model...")
     model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
 
+    params = nnx.state(model)
+    params = nnx_utils.state_map(params, train_config.freeze_filter, lambda p: p.replace(p.value.astype(jnp.bfloat16)))
+    trainable_params = params.filter(train_config.trainable_filter)
+    
     data_config = train_config.data.create(train_config.assets_dirs, train_config.model)
     if norm_stats is None:
         # We are loading the norm stats from the checkpoint instead of the config assets dir to make sure
