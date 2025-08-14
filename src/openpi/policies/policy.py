@@ -49,6 +49,9 @@ class Policy(BasePolicy):
             actions_transform,
             raw_actions_transform
         )
+        self._unnormalize_transform = _transforms.compose([
+            t for t in output_transforms if isinstance(t, _transforms.Unnormalize)
+        ])
         
     @override
     def infer(self, obs: dict, noise: jnp.ndarray | None = None) -> dict:  # type: ignore[misc]
@@ -83,7 +86,6 @@ class Policy(BasePolicy):
         # Unbatch and convert to np.ndarray.
         if batch_size == 1:
             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
-    
         return self._output_transform(outputs)
     
     def reverse_infer(self, obs: dict, action: jnp.ndarray | None = None) -> dict:  # type: ignore[misc]
@@ -143,7 +145,10 @@ class Policy(BasePolicy):
     @property
     def metadata(self) -> dict[str, Any]:
         return self._metadata
-
+    
+    def unnormalize_actions(self, norm_actions: np.ndarray) -> np.ndarray:
+        """Unnormalize actions using the unnormalize transforms."""
+        return self._unnormalize_transform({"actions": norm_actions})["actions"][..., :7]  # only keep the first 7 actions
 
 class PolicyRecorder(_base_policy.BasePolicy):
     """Records the policy's behavior to disk."""
@@ -183,7 +188,11 @@ class ActionTransformWrapper:
         return_dict["actions"] = trans_unnorm_dict["actions"][..., :7]  # only keep the first 7 actions
             
         norm_dict = doc.copy()
-        return_dict["norm_actions"] = self.raw_actions_tf(norm_dict)["actions"]
+        return_dict["norm_actions"] = self.raw_actions_tf(norm_dict)["actions"][..., :7]  # only keep the first 7 actions
+        
+        norm_pad_dict = doc.copy()
+        return_dict["norm_pad_actions"] = self.raw_actions_tf(norm_pad_dict)["actions"]
+        
         return return_dict
     
 def remove_transform_of_type(transforms_list, target_cls):

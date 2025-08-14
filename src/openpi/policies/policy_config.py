@@ -52,7 +52,7 @@ def create_trained_policy(
     repack_transforms = repack_transforms or transforms.Group()
     checkpoint_dir = download.maybe_download(str(checkpoint_dir))
 
-    logging.info("Loading model...")
+    logging.info(f"Loading model... from {checkpoint_dir}")
     model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
 
     params = nnx.state(model)
@@ -66,6 +66,10 @@ def create_trained_policy(
         if data_config.asset_id is None:
             raise ValueError("Asset id is required to load norm stats.")
         norm_stats = _checkpoints.load_norm_stats(checkpoint_dir / "assets", data_config.asset_id)
+
+    unnormalize_transform = transforms.compose([
+                transforms.Unnormalize(norm_stats, use_quantiles=data_config.use_quantile_norm, wo_pad=True)
+            ])
 
     return _policy.Policy(
         model,
@@ -84,4 +88,4 @@ def create_trained_policy(
         ],
         sample_kwargs=sample_kwargs,
         metadata=train_config.policy_metadata,
-    )
+    ), unnormalize_transform

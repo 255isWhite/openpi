@@ -149,6 +149,7 @@ class Unnormalize(DataTransformFn):
     norm_stats: at.PyTree[NormStats] | None
     # If true, will use quantile normalization. Otherwise, normal z-score normalization will be used.
     use_quantiles: bool = False
+    wo_pad: bool = False
 
     def __post_init__(self):
         if self.norm_stats is not None and self.use_quantiles:
@@ -159,20 +160,46 @@ class Unnormalize(DataTransformFn):
             return data
 
         # Make sure that all the keys in the norm stats are present in the data.
-        return apply_tree(
-            data,
-            self.norm_stats,
-            self._unnormalize_quantile if self.use_quantiles else self._unnormalize,
-            strict=True,
-        )
+        if self.use_quantiles:
+            return apply_tree(
+                data,
+                self.norm_stats,
+                self._unnormalize_quantile if not self.wo_pad else self._unnormalize_quantile_wo_pad,
+                strict=False,
+            )
+        else:
+            return apply_tree(
+                data,
+                self.norm_stats,
+                self._unnormalize if not self.wo_pad else self._unnormalize_wo_pad,
+                strict=False,
+            )
 
     def _unnormalize(self, x, stats: NormStats):
         return x * (stats.std + 1e-6) + stats.mean
+    
+    def _unnormalize_wo_pad(self, x, stats: NormStats):
+        # 截取与 x 对应的前 N 位
+        std = stats.std[:x.shape[-1]]
+        mean = stats.mean[:x.shape[-1]]
+
+        return x * (std + 1e-6) + mean
 
     def _unnormalize_quantile(self, x, stats: NormStats):
         assert stats.q01 is not None
         assert stats.q99 is not None
         return (x + 1.0) / 2.0 * (stats.q99 - stats.q01 + 1e-6) + stats.q01
+    
+    def _unnormalize_quantile_wo_pad(self, x, stats: NormStats):
+        assert stats.q01 is not None
+        assert stats.q99 is not None
+
+        # 截取与 x 对应的前 7 位
+        q01 = stats.q01[:x.shape[-1]]
+        q99 = stats.q99[:x.shape[-1]]
+
+        return (x + 1.0) / 2.0 * (q99 - q01 + 1e-6) + q01
+
 
 
 @dataclasses.dataclass(frozen=True)
@@ -212,7 +239,6 @@ class DeltaActions(DataTransformFn):
         dims = mask.shape[-1]
         actions[..., :dims] -= np.expand_dims(np.where(mask, state[..., :dims], 0), axis=-2)
         data["actions"] = actions
-
         return data
 
 
@@ -235,10 +261,8 @@ class AbsoluteActions(DataTransformFn):
         abs_offset = jnp.where(mask, state[..., :dims], 0)
         # insert a length-1 chunk axis so we can broadcast over the chunk dimension
         abs_offset = abs_offset[..., None, :]  # equivalent to expand_dims(axis=-2)
-
         # use `.at` to add to the first `dims` of the last axis
         actions = actions.at[..., :dims].add(abs_offset)
-
         data["actions"] = actions
         return data
 
