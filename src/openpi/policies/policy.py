@@ -185,10 +185,10 @@ class ActionTransformWrapper:
 
         unnorm_dict = doc.copy()
         trans_unnorm_dict = self.actions_tf(unnorm_dict)
-        return_dict["actions"] = trans_unnorm_dict["actions"][..., :7]  # only keep the first 7 actions
+        return_dict["actions"] = trans_unnorm_dict["actions"][..., :14]  # only keep the first 7 actions
             
         norm_dict = doc.copy()
-        return_dict["norm_actions"] = self.raw_actions_tf(norm_dict)["actions"][..., :7]  # only keep the first 7 actions
+        return_dict["norm_actions"] = self.raw_actions_tf(norm_dict)["actions"][..., :14]  # only keep the first 7 actions
         
         norm_pad_dict = doc.copy()
         return_dict["norm_pad_actions"] = self.raw_actions_tf(norm_pad_dict)["actions"]
