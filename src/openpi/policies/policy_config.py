@@ -35,6 +35,9 @@ def create_trained_policy(
     sample_kwargs: dict[str, Any] | None = None,
     default_prompt: str | None = None,
     norm_stats: dict[str, transforms.NormStats] | None = None,
+    guidance=None,
+    guidance_scale: float = 1.0,
+    denoise_steps: int = 10,
 ) -> _policy.Policy:
     """Create a policy from a trained checkpoint.
 
@@ -54,7 +57,7 @@ def create_trained_policy(
 
     logging.info(f"Loading model... from {checkpoint_dir}")
     model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
-
+    graphdef, state = nnx.split(model)
     params = nnx.state(model)
     params = nnx_utils.state_map(params, train_config.freeze_filter, lambda p: p.replace(p.value.astype(jnp.bfloat16)))
     trainable_params = params.filter(train_config.trainable_filter)
@@ -88,4 +91,7 @@ def create_trained_policy(
         ],
         sample_kwargs=sample_kwargs,
         metadata=train_config.policy_metadata,
-    ), unnormalize_transform
+        guidance=guidance,
+        guidance_scale=guidance_scale,
+        denoise_steps=denoise_steps,
+    ), unnormalize_transform, params, graphdef

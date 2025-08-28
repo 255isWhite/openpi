@@ -422,13 +422,21 @@ def apply_tree(
     return unflatten_dict({k: transform(k, v) for k, v in tree.items()})
 
 
-def pad_to_dim(x: np.ndarray, target_dim: int, axis: int = -1) -> np.ndarray:
-    """Pad an array to the target dimension with zeros along the specified axis."""
+def pad_to_dim(x, target_dim: int, axis: int = -1):
+    """Pad an array to the target dimension with zeros along the specified axis.
+    
+    - Works with both numpy.ndarray and jax.numpy.ndarray.
+    - If x is JAX array (inside jit/grad), will use jax.numpy.pad.
+    - If x is numpy array, will use numpy.pad.
+    """
     current_dim = x.shape[axis]
     if current_dim < target_dim:
         pad_width = [(0, 0)] * len(x.shape)
         pad_width[axis] = (0, target_dim - current_dim)
-        return np.pad(x, pad_width)
+        if isinstance(x, np.ndarray):
+            return np.pad(x, pad_width)
+        else:  # assume JAX array / tracer
+            return jnp.pad(x, pad_width)
     return x
 
 

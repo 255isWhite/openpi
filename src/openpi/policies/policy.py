@@ -2,7 +2,7 @@ from collections.abc import Sequence
 import logging
 import pathlib
 from typing import Any, TypeAlias
-
+from jaxrl2.types import Params, PRNGKey
 import flax
 import flax.traverse_util
 import jax
@@ -10,7 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 from openpi_client import base_policy as _base_policy
 from typing_extensions import override
-
+import time
 from openpi import transforms as _transforms
 from openpi.models import model as _model
 from openpi.shared import array_typing as at
@@ -29,8 +29,14 @@ class Policy(BasePolicy):
         output_transforms: Sequence[_transforms.DataTransformFn] = (),
         sample_kwargs: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
+        guidance=None, guidance_scale: float = 1.0,
+        denoise_steps: int = 10,
     ):
         self._sample_actions = nnx_utils.module_jit(model.sample_actions)
+        self._sample_actions_train = nnx_utils.module_jit(model.sample_actions_train)
+        self._sample_actions_w_guidance = nnx_utils.module_jit(model.sample_actions_w_guidance)
+        self._sample_actions_w_guidance_train = nnx_utils.module_jit(model.sample_actions_w_guidance_train)
+        self._sample_guidance = nnx_utils.module_jit(model.sample_guidance)
         self._sample_noise = nnx_utils.module_jit(model.sample_noise)
         self._input_transform = _transforms.compose(transforms)
         self._rng = rng or jax.random.key(0)
@@ -39,7 +45,10 @@ class Policy(BasePolicy):
         self.action_dim = model.action_dim
         self.action_horizon = model.action_horizon
         self._get_prefix_rep = nnx_utils.module_jit(model.get_prefix_rep)
-        
+        self._guidance = guidance
+        self._guidance_scale = guidance_scale
+        self._denoise_steps = denoise_steps
+
         # we make output transforms optional for unnormalized actions
         actions_transform = _transforms.compose(output_transforms)
         raw_actions_transform = _transforms.compose(
@@ -54,7 +63,7 @@ class Policy(BasePolicy):
         ])
         
     @override
-    def infer(self, obs: dict, noise: jnp.ndarray | None = None) -> dict:  # type: ignore[misc]
+    def infer(self, obs: dict, guidance_obs: dict, noise: jnp.ndarray | None = None) -> dict:  # type: ignore[misc]
         # Make a copy since transformations may modify the inputs in place.
         inputs = jax.tree.map(lambda x: x, obs)
         inputs = self._input_transform(inputs)
@@ -78,15 +87,18 @@ class Policy(BasePolicy):
         if noise is None:
             self._rng, sample_rng = jax.random.split(self._rng)
             noise = jax.random.normal(sample_rng, (batch_size, self.action_horizon, self.action_dim))
+        actions, a_list = self._sample_actions(_model.Observation.from_dict(inputs), noise=noise, guidance=self._guidance, \
+            guidance_obs=guidance_obs, guidance_scale=self._guidance_scale, \
+             **self._sample_kwargs)
         outputs = {
             "state": inputs["state"],
-            "actions": self._sample_actions(_model.Observation.from_dict(inputs), noise=noise, **self._sample_kwargs),
+            "actions": actions,
         }
         
         # Unbatch and convert to np.ndarray.
         if batch_size == 1:
             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
-        return self._output_transform(outputs)
+        return self._output_transform(outputs), a_list
     
     def reverse_infer(self, obs: dict, action: jnp.ndarray | None = None) -> dict:  # type: ignore[misc]
         # Make a copy since transformations may modify the inputs in place.
@@ -121,6 +133,116 @@ class Policy(BasePolicy):
             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
     
         return outputs
+    
+    def infer_with_guidance_train(self, obs: dict, guidance_obs: dict, noise: jnp.ndarray | None = None) -> dict:  # type: ignore[misc]
+        # Make a copy since transformations may modify the inputs in place.
+        inputs = jax.tree.map(lambda x: x, obs)
+        # print("infer_with_guidance obs keys:", inputs.keys())
+        inputs = self._input_transform(inputs)
+        # print(f"after trans, keys are {inputs.keys()}")
+        # Make a batch and convert to jax.Array.
+        if inputs["state"].ndim > 1:
+            batch_size = inputs["state"].shape[0]
+            def _add_batch_dim(x):
+                return jnp.broadcast_to(
+                    x[jnp.newaxis, ...],
+                    (batch_size,) + x.shape
+                )
+                
+            inputs = jax.tree.map(lambda x: jnp.asarray(x), inputs)
+            for key in inputs:
+                if key not in ["image", "state"]:
+                    inputs[key] = jax.tree.map(lambda x: _add_batch_dim(x), inputs[key])
+        else:
+            batch_size = 1
+            inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
+        # self._rng, sample_rng = jax.random.split(self._rng)
+        if noise is None:
+            self._rng, sample_rng = jax.random.split(self._rng)
+            noise = jax.random.normal(sample_rng, (batch_size, self.action_horizon, self.action_dim))
+        actions, a_list = self._sample_actions_w_guidance_train(_model.Observation.from_dict(inputs), noise=noise, guidance=self._guidance, \
+            guidance_obs=guidance_obs, guidance_scale=self._guidance_scale, \
+             **self._sample_kwargs)
+        outputs = {
+            "state": inputs["state"],
+            "actions": actions,
+        }
+        
+        # Unbatch and convert to np.ndarray.
+        if batch_size == 1:
+            outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
+        return self._output_transform(outputs), a_list
+
+    def infer_with_guidance(self, obs: dict, guidance_obs: dict, noise: jnp.ndarray | None = None) -> dict:  # type: ignore[misc]
+        # Make a copy since transformations may modify the inputs in place.
+        inputs = jax.tree.map(lambda x: x, obs)
+        # print("infer_with_guidance obs keys:", inputs.keys())
+        inputs = self._input_transform(inputs)
+        # print(f"after trans, keys are {inputs.keys()}")
+        # Make a batch and convert to jax.Array.
+        if inputs["state"].ndim > 1:
+            batch_size = inputs["state"].shape[0]
+            def _add_batch_dim(x):
+                return jnp.broadcast_to(
+                    x[jnp.newaxis, ...],
+                    (batch_size,) + x.shape
+                )
+                
+            inputs = jax.tree.map(lambda x: jnp.asarray(x), inputs)
+            for key in inputs:
+                if key not in ["image", "state"]:
+                    inputs[key] = jax.tree.map(lambda x: _add_batch_dim(x), inputs[key])
+        else:
+            batch_size = 1
+            inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
+        # self._rng, sample_rng = jax.random.split(self._rng)
+        if noise is None:
+            self._rng, sample_rng = jax.random.split(self._rng)
+            noise = jax.random.normal(sample_rng, (batch_size, self.action_horizon, self.action_dim))
+        actions, a_list = self._sample_actions_w_guidance(_model.Observation.from_dict(inputs), noise=noise, guidance=self._guidance, \
+            guidance_obs=guidance_obs, guidance_scale=self._guidance_scale,\
+             **self._sample_kwargs)
+        outputs = {
+            "state": inputs["state"],
+            "actions": actions,
+        }
+        
+        # Unbatch and convert to np.ndarray.
+        if batch_size == 1:
+            outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
+        return self._output_transform(outputs), a_list
+
+    def noise_guidance_sampling(self, obs: dict, guidance_obs: dict, rng: PRNGKey, guidance_params: Params, noise: jnp.ndarray | None = None) -> dict:  # type: ignore[misc]
+
+        # Make a copy since transformations may modify the inputs in place.
+        inputs = jax.tree.map(lambda x: x, obs)
+        inputs = self._input_transform(inputs)
+        # Make a batch and convert to jax.Array.
+        if inputs["state"].ndim > 1:
+            batch_size = inputs["state"].shape[0]
+            def _add_batch_dim(x):
+                return jnp.broadcast_to(
+                    x[jnp.newaxis, ...],
+                    (batch_size,) + x.shape
+                )
+            inputs = jax.tree.map(lambda x: jnp.asarray(x), inputs)
+            for key in inputs:
+                if key not in ["image", "state"]:
+                    inputs[key] = jax.tree.map(lambda x: _add_batch_dim(x), inputs[key])
+        else:
+            batch_size = 1
+            inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
+            
+        # self._rng, sample_rng = jax.random.split(self._rng)
+        if noise is None:
+            # rng, sample_rng = jax.random.split(rng)
+            noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
+
+        _, q_means = self._sample_guidance(_model.Observation.from_dict(inputs), noise=noise, guidance=self._guidance, \
+            guidance_obs=guidance_obs, guidance_scale=self._guidance_scale, guidance_params=guidance_params, \
+                 **self._sample_kwargs)
+
+        return q_means
     
     @override
     def get_prefix_rep(self, obs: dict):

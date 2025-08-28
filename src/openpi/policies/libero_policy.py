@@ -6,6 +6,7 @@ import numpy as np
 from openpi import transforms
 from openpi.models import model as _model
 
+import jax.numpy as jnp
 
 def make_libero_example() -> dict:
     """Creates a random input example for the Libero policy."""
@@ -15,15 +16,36 @@ def make_libero_example() -> dict:
         "observation/wrist_image": np.random.randint(256, size=(224, 224, 3), dtype=np.uint8),
         "prompt": "do something",
     }
+    
+def safe_zeros_like(x):
+    """Return zeros_like compatible with both numpy and jax arrays."""
+    if isinstance(x, np.ndarray):
+        return np.zeros_like(x)
+    else:  # assume jax.Array / tracer
+        return jnp.zeros_like(x)
 
+def _parse_image(image):
+    """Convert input image to uint8 numpy/jax array in (H, W, C) format.
+    
+    - Works with both numpy.ndarray and jax.Array.
+    - Converts float images [0,1] to uint8.
+    - Ensures channel-last format.
+    """
+    # 保持类型一致
+    if isinstance(image, np.ndarray):
+        arr = np.asarray(image)
+    else:  # jax array / tracer
+        arr = jnp.asarray(image)
 
-def _parse_image(image) -> np.ndarray:
-    image = np.asarray(image)
-    if np.issubdtype(image.dtype, np.floating):
-        image = (255 * image).astype(np.uint8)
-    if image.shape[0] == 3:
-        image = einops.rearrange(image, "c h w -> h w c")
-    return image
+    # 如果是 float，缩放到 [0,255]
+    if arr.dtype.kind == "f":  
+        arr = (255 * arr).astype(jnp.uint8 if isinstance(arr, jnp.ndarray) else np.uint8)
+
+    # 如果是 (C,H,W)，转成 (H,W,C)
+    if arr.shape[0] == 3 and arr.ndim == 3:
+        arr = einops.rearrange(arr, "c h w -> h w c")
+
+    return arr
 
 
 @dataclasses.dataclass(frozen=True)
@@ -73,13 +95,12 @@ class LiberoInputs(transforms.DataTransformFn):
                 "base_0_rgb": base_image,
                 "left_wrist_0_rgb": wrist_image,
                 # Pad any non-existent images with zero-arrays of the appropriate shape.
-                "right_wrist_0_rgb": np.zeros_like(base_image),
+                "right_wrist_0_rgb": safe_zeros_like(base_image),
             },
             "image_mask": {
-                "base_0_rgb": np.True_,
-                "left_wrist_0_rgb": np.True_,
-                # Mask any non-existent images with False (if ``mask_padding`` is True).
-                "right_wrist_0_rgb": np.False_ if mask_padding else np.True_,
+                "base_0_rgb": True,   # 直接用 Python bool，不要用 np.True_
+                "left_wrist_0_rgb": True,
+                "right_wrist_0_rgb": False if mask_padding else True,
             },
         }
 
