@@ -712,7 +712,7 @@ class Pi0(_model.BaseModel):
 
         # print(f"length of q_list: {len(q_list)}, shape of each q: {q_list[0].shape}")
 
-        return x_0[:, 0, :]
+        return x_0[:, 0, :], a_list
     
 
     def sample_guidance(
