@@ -273,6 +273,7 @@ class Pi0(_model.BaseModel):
         noise: jnp.ndarray,
         num_steps: int | at.Int[at.Array, ""] = 10,
     ) -> _model.Actions:
+        print(f"[JIT Compile] PI0 sample_actions")
         observation = _model.preprocess_observation(None, observation, train=False)
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
         # distribution. yes, this is the opposite of the pi0 paper, and I'm sorry.
@@ -283,7 +284,8 @@ class Pi0(_model.BaseModel):
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
         _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
-        def step(carry):
+        
+        def step(carry, _):
             x_t, time = carry
             suffix_tokens, suffix_mask, suffix_ar_mask = self.embed_suffix(
                 observation, x_t, jnp.broadcast_to(time, batch_size)
@@ -311,14 +313,86 @@ class Pi0(_model.BaseModel):
             assert prefix_out is None
             v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
-            return x_t + dt * v_t, time + dt
+            return (x_t + dt * v_t, time + dt), x_t[:, 0, :]
+        
+        # 扫描固定 num_steps 次
+        (x_0, _), middle_actions = jax.lax.scan(step, (noise, 1.0), xs=None, length=num_steps)
+        
+        middle_actions = jnp.concatenate([middle_actions, x_0[:, 0, :][None]], axis=0)  # (num_steps+1, batch_size)
+        middle_actions = jnp.flip(middle_actions, axis=0).transpose(1, 0, 2)  # (batch_size, num_steps+1, action_dim)
+        
+        return x_0, middle_actions
+    
+    def sample_actions_with_res_actor(
+        self,
+        observation: _model.Observation,
+        actor_obs: dict,
+        *,
+        noise: jnp.ndarray,
+        res_actor = None,
+        res_coeff: float = 0.1,
+        num_steps: int | at.Int[at.Array, ""] = 10,
+    ) -> _model.Actions:
+        print(f"[JIT Compile] PI0 sample_actions_with_res_actor")
+        observation = _model.preprocess_observation(None, observation, train=False)
+        # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
+        # distribution. yes, this is the opposite of the pi0 paper, and I'm sorry.
+        dt = -1.0 / num_steps
+        batch_size = observation.state.shape[0]
+        # first fill KV cache with a forward pass of the prefix
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+        positions = jnp.cumsum(prefix_mask, axis=1) - 1
+        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+        
+        def step(carry, _):
+            x_t, time, time_index = carry
+            suffix_tokens, suffix_mask, suffix_ar_mask = self.embed_suffix(
+                observation, x_t, jnp.broadcast_to(time, batch_size)
+            )
+            # `suffix_attn_mask` is shape (b, suffix_len, suffix_len) indicating how the suffix tokens can attend to each
+            # other
+            suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
+            # `prefix_attn_mask` is shape (b, suffix_len, prefix_len) indicating how the suffix tokens can attend to the
+            # prefix tokens
+            prefix_attn_mask = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
+            # `combined_mask` is shape (b, suffix_len, prefix_len + suffix_len) indicating how the suffix tokens (which
+            # generate the queries) can attend to the full prefix + suffix sequence (which generates the keys and values)
+            full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
+            assert full_attn_mask.shape == (
+                batch_size,
+                suffix_tokens.shape[1],
+                prefix_tokens.shape[1] + suffix_tokens.shape[1],
+            )
+            # `positions` is shape (b, suffix_len) indicating the positions of the suffix tokens
+            positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
 
-        def cond(carry):
-            x_t, time = carry
-            # robust to floating-point error
-            return time >= -dt / 2
-        x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
-        return x_0
+            (prefix_out, suffix_out), _ = self.PaliGemma.llm(
+                [None, suffix_tokens], mask=full_attn_mask, positions=positions, kv_cache=kv_cache
+            )
+            assert prefix_out is None
+            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+            
+            # residual action part
+            res_actions, _ = res_actor.apply_fn({'params': res_actor.params}, actor_obs, times=jnp.full((batch_size, 1), time_index, dtype=jnp.int32))
+            # print(f"res_actions: {res_actions}, shape: {res_actions.shape}")
+            # print(f"vt shape : {v_t.shape}, res_actions shape: {res_actions.shape}")
+            res_actions = einops.repeat(res_actions, 'b a -> b s a', s=v_t.shape[1])
+            mask = (time_index != num_steps)  # 第一轮 False，其余 True
+            
+            return (x_t + dt * v_t + res_actions * res_coeff * mask, time + dt, time_index-1), x_t[:, 0, :]
+        
+        # 扫描固定 num_steps 次
+        (x_0, _, _), middle_actions = jax.lax.scan(step, (noise, 1.0, num_steps), xs=None, length=num_steps)
+        
+        middle_actions = jnp.concatenate([middle_actions, x_0[:, 0, :][None]], axis=0)  # (num_steps+1, batch_size)
+        middle_actions = jnp.flip(middle_actions, axis=0).transpose(1, 0, 2)  # (batch_size, num_steps+1, action_dim)
+        
+        # at time 0 add res action
+        res_actions, _ = res_actor.apply_fn({'params': res_actor.params}, actor_obs, times=jnp.full((batch_size, 1), 0, dtype=jnp.int32))
+        res_actions = einops.repeat(res_actions, 'b a -> b s a', s=x_0.shape[1])    
+    
+        return x_0 + res_actions * res_coeff, middle_actions
     
     def sample_noise(
         self,

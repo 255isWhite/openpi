@@ -35,6 +35,8 @@ def create_trained_policy(
     sample_kwargs: dict[str, Any] | None = None,
     default_prompt: str | None = None,
     norm_stats: dict[str, transforms.NormStats] | None = None,
+    res_actor=None,
+    res_coeff:float=0.1,
 ) -> _policy.Policy:
     """Create a policy from a trained checkpoint.
 
@@ -88,4 +90,6 @@ def create_trained_policy(
         ],
         sample_kwargs=sample_kwargs,
         metadata=train_config.policy_metadata,
+        res_actor=res_actor,
+        res_coeff=res_coeff,
     ), unnormalize_transform

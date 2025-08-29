@@ -29,8 +29,11 @@ class Policy(BasePolicy):
         output_transforms: Sequence[_transforms.DataTransformFn] = (),
         sample_kwargs: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
+        res_actor=None,
+        res_coeff:float=0.1,
     ):
         self._sample_actions = nnx_utils.module_jit(model.sample_actions)
+        self._sample_actions_with_res_actor = nnx_utils.module_jit(model.sample_actions_with_res_actor)
         self._sample_noise = nnx_utils.module_jit(model.sample_noise)
         self._input_transform = _transforms.compose(transforms)
         self._rng = rng or jax.random.key(0)
@@ -39,6 +42,8 @@ class Policy(BasePolicy):
         self.action_dim = model.action_dim
         self.action_horizon = model.action_horizon
         self._get_prefix_rep = nnx_utils.module_jit(model.get_prefix_rep)
+        self.res_actor = res_actor
+        self.res_coeff = res_coeff
         
         # we make output transforms optional for unnormalized actions
         actions_transform = _transforms.compose(output_transforms)
@@ -78,15 +83,51 @@ class Policy(BasePolicy):
         if noise is None:
             self._rng, sample_rng = jax.random.split(self._rng)
             noise = jax.random.normal(sample_rng, (batch_size, self.action_horizon, self.action_dim))
+        actions, middle_actions = self._sample_actions(_model.Observation.from_dict(inputs), noise=noise, **self._sample_kwargs)
         outputs = {
             "state": inputs["state"],
-            "actions": self._sample_actions(_model.Observation.from_dict(inputs), noise=noise, **self._sample_kwargs),
+            "actions": actions,
         }
         
         # Unbatch and convert to np.ndarray.
         if batch_size == 1:
             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
-        return self._output_transform(outputs)
+        return self._output_transform(outputs), middle_actions
+    
+    def infer_with_res_actor(self, obs: dict, actor_obs: dict, noise: jnp.ndarray | None = None) -> dict:  # type: ignore[misc]
+        # Make a copy since transformations may modify the inputs in place.
+        inputs = jax.tree.map(lambda x: x, obs)
+        inputs = self._input_transform(inputs)
+        # Make a batch and convert to jax.Array.
+        if inputs["state"].ndim > 1:
+            batch_size = inputs["state"].shape[0]
+            def _add_batch_dim(x):
+                return jnp.broadcast_to(
+                    x[jnp.newaxis, ...],
+                    (batch_size,) + x.shape
+                )
+                
+            inputs = jax.tree.map(lambda x: jnp.asarray(x), inputs)
+            for key in inputs:
+                if key not in ["image", "state"]:
+                    inputs[key] = jax.tree.map(lambda x: _add_batch_dim(x), inputs[key])
+        else:
+            batch_size = 1
+            inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
+        # self._rng, sample_rng = jax.random.split(self._rng)
+        if noise is None:
+            self._rng, sample_rng = jax.random.split(self._rng)
+            noise = jax.random.normal(sample_rng, (batch_size, self.action_horizon, self.action_dim))
+        actions, middle_actions = self._sample_actions_with_res_actor(_model.Observation.from_dict(inputs), actor_obs, noise=noise, res_actor=self.res_actor, res_coeff=self.res_coeff, **self._sample_kwargs)
+        outputs = {
+            "state": inputs["state"],
+            "actions": actions,
+        }
+        
+        # Unbatch and convert to np.ndarray.
+        if batch_size == 1:
+            outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
+        return self._output_transform(outputs), middle_actions
     
     def reverse_infer(self, obs: dict, action: jnp.ndarray | None = None) -> dict:  # type: ignore[misc]
         # Make a copy since transformations may modify the inputs in place.
