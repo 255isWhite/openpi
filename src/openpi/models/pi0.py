@@ -378,9 +378,9 @@ class Pi0(_model.BaseModel):
             # print(f"res_actions: {res_actions}, shape: {res_actions.shape}")
             # print(f"vt shape : {v_t.shape}, res_actions shape: {res_actions.shape}")
             res_actions = einops.repeat(res_actions, 'b a -> b s a', s=v_t.shape[1])
-            mask = (time_index != num_steps)  # 第一轮 False，其余 True
+            # mask = (time_index != num_steps)  # 第一轮 False，其余 True
             
-            return (x_t + dt * v_t + res_actions * res_coeff * mask, time + dt, time_index-1), x_t[:, 0, :]
+            return (x_t + dt * v_t + res_actions * res_coeff, time + dt, time_index-1), x_t[:, 0, :]
         
         # 扫描固定 num_steps 次
         (x_0, _, _), middle_actions = jax.lax.scan(step, (noise, 1.0, num_steps), xs=None, length=num_steps)
