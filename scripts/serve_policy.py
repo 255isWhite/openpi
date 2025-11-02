@@ -18,6 +18,7 @@ class EnvMode(enum.Enum):
     ALOHA_SIM = "aloha_sim"
     DROID = "droid"
     LIBERO = "libero"
+    LIBERO_PI0 = "libero_pi0"
 
 
 @dataclasses.dataclass
@@ -58,20 +59,24 @@ class Args:
 # Default checkpoints that should be used for each environment.
 DEFAULT_CHECKPOINT: dict[EnvMode, Checkpoint] = {
     EnvMode.ALOHA: Checkpoint(
-        config="pi0_aloha",
-        dir="s3://openpi-assets/checkpoints/pi0_base",
+        config="pi05_aloha",
+        dir="gs://openpi-assets/checkpoints/pi05_base",
     ),
     EnvMode.ALOHA_SIM: Checkpoint(
         config="pi0_aloha_sim",
-        dir="s3://openpi-assets/checkpoints/pi0_aloha_sim",
+        dir="gs://openpi-assets/checkpoints/pi0_aloha_sim",
     ),
     EnvMode.DROID: Checkpoint(
-        config="pi0_droid",
-        dir="s3://openpi-assets/checkpoints/pi0_droid",
+        config="pi05_droid",
+        dir="gs://openpi-assets/checkpoints/pi05_droid",
     ),
     EnvMode.LIBERO: Checkpoint(
+        config="pi05_libero",
+        dir="gs://openpi-assets/checkpoints/pi05_libero",
+    ),
+    EnvMode.LIBERO_PI0: Checkpoint(
         config="pi0_libero",
-        dir="s3://openpi-assets/checkpoints/pi0_libero",
+        dir="gs://openpi-assets/checkpoints/pi0_libero",
     ),
 }
 
